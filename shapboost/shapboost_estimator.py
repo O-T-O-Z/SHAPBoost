@@ -358,7 +358,6 @@ class SHAPBoostEstimator(BaseEstimator, ABC):
         metric = None
         metric_t_all = np.zeros((len(feature_combinations), 1))
         r2_t_all = np.zeros((len(feature_combinations), 1))
-        std_t_all = np.zeros((len(feature_combinations), 1))
         for idx_1, i in enumerate(feature_combinations):
             X_subset = X[:, i]
             n = len(X_subset)
@@ -370,24 +369,57 @@ class SHAPBoostEstimator(BaseEstimator, ABC):
 
             metric_t_folds = np.zeros((self.number_of_folds, 1))
             r2_t_folds = np.zeros((self.number_of_folds, 1))
-            # Compute accuracy for each SISO input.
+
             if self.stratification:
-                kf_splits = self.kf.split(X_subset, stratification)
+                if self.number_of_folds > X_subset.shape[0]:
+                    self.logger.warning(
+                        "Number of folds is greater than the number of samples. "
+                        "Using leave-one-out cross-validation, stratification is disabled."
+                    )
+                    kf_splits = KFold(n_splits=X_subset.shape[0], shuffle=True).split(
+                        X_subset
+                    )
+                    stratification = False
+                else:
+                    kf_splits = self.kf.split(X_subset, stratification)
+            elif self.number_of_folds > X_subset.shape[0]:
+                kf_splits = KFold(n_splits=X_subset.shape[0], shuffle=True).split(
+                    X_subset
+                )
             else:
                 kf_splits = self.kf.split(X_subset)
+            loo_metric = self.number_of_folds == X_subset.shape[0]
+            if loo_metric:
+                predictions, tests = [], []
             for count, (train_index, test_index) in enumerate(kf_splits):
                 X_train, X_test = X_subset[train_index], X_subset[test_index]
                 y_train, y_test = Y[train_index], Y[test_index]
                 self._fit_estimator(X_train, y_train, estimator_idx=1)
-                metric = self._score(y_test, self.estimator[1].predict(X_test))  # type: ignore # noqa
+                if loo_metric:
+                    predictions.append(self.estimator[1].predict(X_test))
+                    tests.append(y_test)
+                else:
+                    metric = self._score(y_test, self.estimator[1].predict(X_test))  # type: ignore # noqa
 
-                if self.metric in ["mae", "mse"]:
-                    r2_t_folds[count, :] = r2_score(y_test, self.estimator[1].predict(X_test))  # type: ignore # noqa
-                metric_t_folds[count, :] = metric
+                    if self.metric in ["mae", "mse"]:
+                        r2_t_folds[count, :] = r2_score(y_test, self.estimator[1].predict(X_test))  # type: ignore # noqa
+                    metric_t_folds[count, :] = metric
+            if loo_metric:
+                predictions = np.array(predictions)
+                tests = np.array(tests).squeeze(1)
+            mean_metric = (
+                self._score(tests, predictions)
+                if loo_metric
+                else np.mean(metric_t_folds)
+            )
+            r2_mean = (
+                (r2_score(tests, predictions) if loo_metric else np.mean(r2_t_folds))
+                if self.metric in ["mae", "mse"]
+                else 0
+            )
 
-            metric_t_all[idx_1, :] = np.mean(metric_t_folds)
-            r2_t_all[idx_1, :] = np.mean(r2_t_folds)
-            std_t_all[idx_1, :] = np.std(metric_t_folds)
+            metric_t_all[idx_1, :] = mean_metric
+            r2_t_all[idx_1, :] = r2_mean
             msg = "SISO (%d/%d) %s: %s = %05f" % (
                 idx_1 + 1,
                 len(feature_combinations),
@@ -396,10 +428,10 @@ class SHAPBoostEstimator(BaseEstimator, ABC):
                     + [self._feature_names[x] for x in self._all_selected_variables]
                 ),
                 self.metric,
-                np.mean(metric_t_folds),
+                mean_metric,
             )
             if self.metric in ["mae", "mse"]:
-                msg += ", R2 = %05f" % (np.mean(r2_t_all[idx_1, :]))
+                msg += ", R2 = %05f" % (r2_mean)
             self.logger.debug(msg)
         best_r2_t = 0
         if self.metric in ["mae", "mse", "logloss"]:
@@ -514,16 +546,30 @@ class SHAPBoostEstimator(BaseEstimator, ABC):
             kf_splits = self.kf.split(X, stratification)
         else:
             kf_splits = self.kf.split(X)
+
+        loo_metric = self.number_of_folds == X.shape[0]
+        if loo_metric:
+            predictions, tests = [], []
         for i, (train_index, test_index) in enumerate(kf_splits):
             X_train, X_test = X[train_index], X[test_index]
             y_train, y_test = Y[train_index], Y[test_index]
             self._fit_estimator(X_train, y_train, estimator_idx=1)
-            metric = self._score(y_test, self.estimator[1].predict(X_test))
+            if loo_metric:
+                predictions.append(self.estimator[1].predict(X_test))
+                tests.append(y_test)
+            else:
+                metric = self._score(y_test, self.estimator[1].predict(X_test))
 
-            self.logger.debug("Fold %02d %s = %05f" % (i + 1, self.metric, metric))
-            metric_t_folds[i] = metric
+                self.logger.debug("Fold %02d %s = %05f" % (i + 1, self.metric, metric))
+                metric_t_folds[i] = metric
+        if loo_metric:
+            predictions = np.array(predictions)
+            tests = np.array(tests).squeeze(1)
+        mean_metric = (
+            self._score(tests, predictions) if loo_metric else np.mean(metric_t_folds)
+        )
 
-        metric_t_miso = float(np.mean(metric_t_folds))
+        metric_t_miso = float(mean_metric)
         self.metric_.append(metric_t_miso)
         self.logger.info(
             "%s of MISO after iteration %02d is %05f"
