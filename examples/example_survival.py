@@ -7,7 +7,7 @@ from lifelines.utils import concordance_index
 from sklearn.model_selection import train_test_split
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.tools.tools import add_constant
-from xgb_survival_regressor import XGBSurvivalRegressor
+from shapboost.helpers.xgb_survival_regressor import XGBSurvivalRegressor
 
 from shapboost import SHAPBoostSurvivalRegressor
 
